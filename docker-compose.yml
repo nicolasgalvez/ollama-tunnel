@@ -1,6 +1,8 @@
 services:
+  # ── Backend A: Ollama (profile: ollama) ───────────────────────────────────
   ollama:
     image: ollama/ollama:latest
+    profiles: ["ollama"]
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
     environment:
       - OLLAMA_MODEL=${OLLAMA_MODEL:-tinyllama}
@@ -8,6 +10,9 @@ services:
     volumes:
       - ${OLLAMA_DATA:-.ollama-data}:/root/.ollama
       - ./ollama-entrypoint.sh:/entrypoint.sh:ro
+    networks:
+      default:
+        aliases: ["backend"]   # stable origin name the tunnel targets
     ports:
       - "11434:11434"
     healthcheck:
@@ -15,7 +20,78 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+    restart: unless-stopped
 
+  # ── Backend B: llama.cpp (profile: llama) ─────────────────────────────────
+  # model-init pre-downloads the GGUF + mmproj into the SHARED Hugging Face
+  # cache (HF_HOME=/hf) so multi-GB files dedup with ComfyUI and other HF tools,
+  # then publishes stable symlinks llama-server loads by a fixed path.
+  model-init:
+    image: python:3.12-slim
+    profiles: ["llama"]
+    entrypoint: ["/bin/sh", "/model-init.sh"]
+    environment:
+      - HF_HOME=/hf
+      - HF_HUB_ENABLE_HF_TRANSFER=1
+      - LLAMA_HF_REPO=${LLAMA_HF_REPO:-unsloth/Qwen3.6-27B-GGUF}
+      - LLAMA_HF_FILE=${LLAMA_HF_FILE:-Qwen3.6-27B-IQ4_XS.gguf}
+      - LLAMA_MMPROJ_FILE=${LLAMA_MMPROJ_FILE:-mmproj-F16.gguf}
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+      - ./model-init.sh:/model-init.sh:ro
+
+  llama:
+    # CUDA 12 image on purpose: low-bit Qwen3.6 quants emit gibberish on CUDA
+    # 13.2, and the model needs a recent build (>= b8954). Pin a digest in
+    # production for reproducibility.
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
+    profiles: ["llama"]
+    depends_on:
+      model-init:
+        condition: service_completed_successfully
+    environment:
+      - LLAMA_ARG_HOST=0.0.0.0
+      - LLAMA_ARG_PORT=11434          # match ollama's port so the tunnel origin is identical
+      - LLAMA_API_KEY=${API_KEY}      # defense-in-depth for LAN access that bypasses Cloudflare
+      - HF_HOME=/hf
+      - NVIDIA_VISIBLE_DEVICES=all
+    command:
+      - "-m"
+      - "/hf/llama-tunnel/model.gguf"
+      - "--mmproj"
+      - "/hf/llama-tunnel/mmproj.gguf"
+      - "-ngl"
+      - "${NGL:-48}"
+      - "-c"
+      - "${CTX:-16384}"
+      - "--cache-type-k"
+      - "q8_0"
+      - "--cache-type-v"
+      - "q8_0"
+      - "--jinja"
+    volumes:
+      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+    networks:
+      default:
+        aliases: ["backend"]   # same alias as ollama → http://backend:11434 works for either
+    ports:
+      - "11434:11434"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11434/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 300s       # model + mmproj load into VRAM can take minutes
+    restart: unless-stopped
+
+  # ── Tunnel: always runs, follows whichever backend profile is active ──────
   cloudflared:
     image: ghcr.io/procyon-creative/cloudflare-tunnel-init:latest
     env_file: .env
@@ -23,9 +99,18 @@ services:
       - ./tunnel-config.json:/config/tunnel-config.json:ro
       - tunnel-data:/shared
     depends_on:
+      # required:false → not an error when a backend's profile is inactive
+      # (needs Compose v2.20.2+). The active backend is waited on as healthy.
       ollama:
         condition: service_healthy
+        required: false
+      llama:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
+
+networks:
+  default:
 
 volumes:
   tunnel-data:
