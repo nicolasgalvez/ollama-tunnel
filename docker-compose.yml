@@ -23,59 +23,31 @@ services:
     restart: unless-stopped
 
   # ── Backend B: llama.cpp (profile: llama) ─────────────────────────────────
-  # model-init pre-downloads the GGUF + mmproj into the SHARED Hugging Face
-  # cache (HF_HOME=/hf) so multi-GB files dedup with ComfyUI and other HF tools,
-  # then publishes stable symlinks llama-server loads by a fixed path.
-  model-init:
-    image: python:3.12-slim
-    profiles: ["llama"]
-    entrypoint: ["/bin/sh", "/model-init.sh"]
-    environment:
-      - HF_HOME=/hf
-      - HF_HUB_ENABLE_HF_TRANSFER=1
-      - LLAMA_HF_REPO=${LLAMA_HF_REPO:-unsloth/Qwen3.6-27B-GGUF}
-      - LLAMA_HF_FILE=${LLAMA_HF_FILE:-Qwen3.6-27B-IQ4_XS.gguf}
-      - LLAMA_MMPROJ_FILE=${LLAMA_MMPROJ_FILE:-mmproj-F16.gguf}
-    volumes:
-      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
-      - ./model-init.sh:/model-init.sh:ro
-
+  # llama-server reads every setting from LLAMA_ARG_* variables in .env (see
+  # tools/server/README.md in llama.cpp). With LLAMA_ARG_HF_REPO it downloads the
+  # model, and its mmproj when the repo has one, into the shared Hugging Face cache
+  # (HF_HOME=/hf), so files dedup with ComfyUI and other HF tools.
   llama:
     # CUDA 12 image on purpose: low-bit Qwen3.6 quants emit gibberish on CUDA
     # 13.2, and the model needs a recent build (>= b8954). Pin a digest in
     # production for reproducibility.
     image: ghcr.io/ggml-org/llama.cpp:server-cuda
     profiles: ["llama"]
-    depends_on:
-      model-init:
-        condition: service_completed_successfully
+    env_file: .env
     environment:
       - LLAMA_ARG_HOST=0.0.0.0
       - LLAMA_ARG_PORT=11434          # match ollama's port so the tunnel origin is identical
-      - LLAMA_API_KEY=${API_KEY}      # defense-in-depth for LAN access that bypasses Cloudflare
-      - HF_HOME=/hf
+      - LLAMA_API_KEY=${API_KEY}      # llama-server's name for .env's API_KEY (defense-in-depth on the LAN)
+      - HF_HOME=/hf                   # the cache's path inside the container (mounted below)
+      - HF_TOKEN                      # from the host's environment when .env doesn't set it
       - NVIDIA_VISIBLE_DEVICES=all
-    command:
-      - "-m"
-      - "/hf/llama-tunnel/model.gguf"
-      - "--mmproj"
-      - "/hf/llama-tunnel/mmproj.gguf"
-      - "-ngl"
-      - "${NGL:-48}"
-      - "-c"
-      - "${CTX:-16384}"
-      - "--cache-type-k"
-      - "q8_0"
-      - "--cache-type-v"
-      - "q8_0"
-      - "--jinja"
     volumes:
-      - ${HF_HOME:-${HOME}/.cache/huggingface}:/hf
+      - ${HF_HOME}:/hf                # host HF_HOME (shell first, then .env)
     networks:
       default:
         aliases: ["backend"]   # same alias as ollama → http://backend:11434 works for either
     ports:
-      - "11434:11434"
+      - "${LLAMA_HOST_PORT}:11434"     # host port from .env (another value when something else holds 11434)
     deploy:
       resources:
         reservations:
@@ -88,7 +60,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 30
-      start_period: 300s       # model + mmproj load into VRAM can take minutes
+      start_period: 300s       # first start downloads the model; loading into VRAM can take minutes
     restart: unless-stopped
 
   # ── Tunnel: always runs, follows whichever backend profile is active ──────

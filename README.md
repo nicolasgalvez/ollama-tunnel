@@ -25,10 +25,10 @@ the same OpenAI API. Same tunnel, same auth, same clients.
   any request lacking `Authorization: Bearer <API_KEY>` before it reaches the
   origin. Backend-agnostic. `llama-server --api-key` adds defense-in-depth for
   LAN access that bypasses the tunnel.
-- **Automated model fetch (llama).** A `model-init` sidecar downloads the GGUF +
-  `mmproj` into the **shared Hugging Face cache** (`HF_HOME`) — dedup'd with
-  ComfyUI and other HF tools — then publishes stable symlinks llama-server loads.
-  No manual pre-download.
+- **Automated model fetch (llama).** llama-server downloads the GGUF named by
+  `LLAMA_ARG_HF_REPO`/`LLAMA_ARG_HF_FILE` (and its `mmproj`, when the repo has one)
+  into the **shared Hugging Face cache** (`HF_HOME`), dedup'd with ComfyUI and other
+  HF tools. Every server setting is an `LLAMA_ARG_*` variable in `.env`.
 
 ## Quick start
 
@@ -55,18 +55,18 @@ Use it:
 - **URL:** `https://your-hostname.example.com/v1/chat/completions`
 - **API key:** whatever you set in `API_KEY`
 - **Model:** ollama → any pulled model (`tinyllama`, `qwen3:30b`, …);
-  llama → whatever GGUF `model-init` fetched (the `model` field is ignored).
+  llama → the GGUF named by `LLAMA_ARG_HF_REPO` (the `model` field is ignored).
 
 ## Choosing a llama model
 
 Defaults target a **16 GB GPU** (e.g. RTX 4060 Ti). Set in `.env`:
 
-| Goal | `LLAMA_HF_REPO` / `LLAMA_HF_FILE` / `LLAMA_MMPROJ_FILE` |
+| Goal | `LLAMA_ARG_HF_REPO` / `LLAMA_ARG_HF_FILE` / `LLAMA_ARG_MMPROJ_AUTO` |
 |------|--------------------------------------------------------|
-| Qwen3.6-27B VL (default, dense, context-efficient) | `unsloth/Qwen3.6-27B-GGUF` · `Qwen3.6-27B-IQ4_XS.gguf` · `mmproj-F16.gguf` |
-| Qwen3-VL-30B-A3B (MoE, faster on a constrained card) | `unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF` · `Qwen3-VL-30B-A3B-Instruct-IQ4_XS.gguf` · `mmproj-F16.gguf` |
+| Qwen3.6-27B VL (default, dense, context-efficient) | `unsloth/Qwen3.6-27B-GGUF` · `Qwen3.6-27B-IQ4_XS.gguf` · `true` |
+| Qwen3-VL-30B-A3B (MoE, faster on a constrained card) | `unsloth/Qwen3-VL-30B-A3B-Instruct-GGUF` · `Qwen3-VL-30B-A3B-Instruct-IQ4_XS.gguf` · `true` |
 
-Tune `NGL` (GPU layers) down if you hit OOM, and `CTX` for context size.
+Tune `LLAMA_ARG_N_GPU_LAYERS` down if you hit OOM, and `LLAMA_ARG_CTX_SIZE` for context size. `HF_HOME` and `HF_TOKEN` come from the host's environment when `.env` doesn't set them (when both set one, Compose uses the host's).
 
 > **llama.cpp build note:** Qwen3.6-27B needs a recent build (≥ `b8954`), and its
 > low-bit quants can output gibberish on **CUDA 13.2** — this compose pins the
@@ -119,11 +119,13 @@ ollama list / pull / run / ps   # services auto-start if not running
 | `OLLAMA_MODEL`         | No       | `tinyllama`                 | ollama: model to pull on start |
 | `OLLAMA_DATA`          | No       | `.ollama-data`              | ollama: model store path |
 | `HF_HOME`              | No       | `~/.cache/huggingface`      | llama: shared HF cache (absolute path) |
-| `LLAMA_HF_REPO`        | No       | `unsloth/Qwen3.6-27B-GGUF`  | llama: HF repo to fetch |
-| `LLAMA_HF_FILE`        | No       | `Qwen3.6-27B-IQ4_XS.gguf`   | llama: GGUF filename |
-| `LLAMA_MMPROJ_FILE`    | No       | `mmproj-F16.gguf`           | llama: mmproj (vision projector) filename |
-| `NGL`                  | No       | `48`                        | llama: GPU layers to offload (`-ngl`) |
-| `CTX`                  | No       | `16384`                     | llama: context size (`-c`) |
+| `LLAMA_ARG_HF_REPO`    | Yes (llama) | `unsloth/Qwen3.6-27B-GGUF` | llama: HF repo to fetch |
+| `LLAMA_ARG_HF_FILE`    | No       | `Qwen3.6-27B-IQ4_XS.gguf`   | llama: GGUF filename (overrides the repo's default quant) |
+| `LLAMA_ARG_MMPROJ_AUTO` | No      | `true`                      | llama: fetch and load the repo's mmproj; `false` for text-only models |
+| `LLAMA_ARG_N_GPU_LAYERS` | No     | `48`                        | llama: GPU layers to offload |
+| `LLAMA_ARG_CTX_SIZE`   | No       | `16384`                     | llama: context size |
+| `LLAMA_HOST_PORT`      | Yes (llama) | `11434`                  | llama: host port to publish |
+| other `LLAMA_ARG_*`    | No       |                             | any llama-server option, per llama.cpp's `tools/server/README.md` |
 
 ## Testing
 
